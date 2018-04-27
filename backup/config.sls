@@ -9,7 +9,7 @@ backup_config__dozbconf:
     - source: salt://backup/files/dozb.conf.jinja
     - template: jinja
     - context:
-      confdict: {{backup|json}}
+        backup: {{backup|json}}
     - mode: 644
     - user: root
     - group: root

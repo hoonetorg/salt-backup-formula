@@ -13,7 +13,7 @@ backup_install__dozbscript:
     - source: salt://backup/files/dozb.jinja
     - template: jinja
     - context:
-      confdict: {{backup|json}}
+        backup: {{backup|json}}
     - mode: 755
     - user: root
     - group: root

@@ -9,7 +9,7 @@ backup_jobs__backupscript:
     - source: salt://backup/files/backupscript.jinja
     - template: jinja
     - context:
-      confdict: {{backup|json}}
+        backup: {{backup|json}}
     - mode: 755
     - user: root
     - group: root

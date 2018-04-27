@@ -1,3 +1,3 @@
-{% for backupdozb, backupdozb_data in backup.get('dozb', {}).items()|sort %}
-./dozb {% for key, value in backupdozb_data.items() %}--{{key}} {{value}} {% endfor %}
+{% for backupdozb, backupdozb_data in backup.get('dozb', {}).get('jobs', {}).items()|sort %}
+dozb {% for key, value in backupdozb_data.items() %}--{{key}} {{value}} {% endfor %}
 {% endfor %}
