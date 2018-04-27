@@ -3,14 +3,10 @@
 
 {% from "backup/map.jinja" import backup with context %}
 
-backup_install__pkg:
-  pkg.installed:
-    - pkgs: {{ backup.pkgs }}
-
-backup_install__dozbscript:
+backup_jobs__backupscript:
   file.managed:
-    - name: {{ backup.dirprefix }}/{{ backup.bindir }}/{{ backup.dozbscript }}
-    - source: salt://backup/files/dozb.jinja
+    - name: {{ backup.dirprefix }}/{{ backup.bindir }}/{{ backup.backupscript }}
+    - source: salt://backup/files/backupscript.jinja
     - template: jinja
     - context:
       confdict: {{backup|json}}

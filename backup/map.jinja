@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 # vim: ft=yaml
 
-#defaults settings - OS independent, will be merged with and overridden by OS specific settings
 {% import_yaml "backup/maps/defaults.map" as backup_defaults %}
 
-#overrides defaults, used if OS specific settings for current OS could not be found in os.map 
 {% import_yaml "backup/maps/osdefaults.map" as backup_osdefaults %}
 
-#overrides defaults, OS specific
 {% import_yaml "backup/maps/os.map" as backup_os %}
 
 {% set backup_os_family = {} %}
@@ -16,10 +13,6 @@
 {% do backup_os_family.update(backup_osdefaults) %}
 {% do backup_os_family.update(backup_os) %}
 
-# - defaults is merged with and overridden by OS specific settings (os, if current OS is defined in os.map, osdefaults if current OS is not defined in os.map) 
-# - resulting dict is merged with 'backup:lookup' - pillar (pillar overrides)
 {%- set backup_default_plus_pillar_lookup = salt['grains.filter_by'](backup_os_family, grain='os_family', merge=salt['pillar.get']('backup:lookup'), default='osdefaults', base='defaults') %}
 
-#FIXME: why this insane double merge in salt pillars
-# now backup_default_plus_pillar_lookup is merged with 'backup'-pillar ('backup'-pillar overrides backup_default_plus_pillar_lookup)
 {%- set backup = salt['pillar.get']('backup', default=backup_default_plus_pillar_lookup, merge=True) %}

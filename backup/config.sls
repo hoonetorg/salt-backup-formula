@@ -3,10 +3,10 @@
 
 {% from "backup/map.jinja" import backup with context %}
 
-backup_config__conffile:
+backup_config__dozbconf:
   file.managed:
-    - name: {{ backup.conffile }}
-    - source: salt://backup/files/configtempl.jinja
+    - name: {{ backup.dirprefix }}/{{ backup.etcdir }}/{{ backup.dozbconf }}
+    - source: salt://backup/files/dozb.conf.jinja
     - template: jinja
     - context:
       confdict: {{backup|json}}

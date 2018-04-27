@@ -1,19 +1,8 @@
 # -*- coding: utf-8 -*-
 # vim: ft=yaml
 
-#debian (overrides defaults, is taken when os_family grain is Debian)
 Debian:
   sysconfdir: /etc/default
-  keys:
-    - backup_os_familydeb1
-    - backup_os_familydeb2
-  backup_os_familydeb: "yes"
 
-
-#redhat (overrides defaults, is taken when os_family grain is RedHat)
 RedHat:
   sysconfdir: /etc/sysconfig
-  keys:
-    - backup_os_familyrh1
-    - backup_os_familyrh2
-  backup_os_familyrh: "yes"

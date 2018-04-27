@@ -1,0 +1,500 @@
+#!/bin/bash
+
+
+function usage(){
+  echo "dozb - DRBDoverZFS-BORG backup tool
+  usage: `basename $0`
+  --stype <SOURCETYPE>
+  --szfsds <SOURCEZFSDS>
+  --dborgrepo <DESTBORGREPO>
+  [--bname <BACKUPNAME>] 
+  # SOURCETYPE: BD
+  --sdrbdvol <SOURCEDRBDVOL>
+  # SOURCETYPE: FSBD
+  --sdrbdvol <SOURCEDRBDVOL>
+  --smount <SOURCEMOUNT>
+  # SOURCETYPE: VM
+  --svm <SOURCEVM>
+  # SOURCETYPE: VMFS
+  --svm <SOURCEVM>
+  --sdrbdvol <SOURCEDRBDVOL>
+  --smount <SOURCEMOUNT>
+
+  SOURCETYPE:                FS(filesystem), BD(blockdevice) or VM(virtual machine)
+  SOURCEZFSDS:               source ZFS dataset
+  DESTBORGREPO:              destination BORG repo
+  BACKUPNAME(optional):      backup name (understands Borg builtins like {hostname}, {fqdn}, {utcnow} 
+    defaults:
+      # SOURCETYPE: BD:      {hostname}-BD-<SOURCEDRBDVOL>-{utcnow} (replace slashes in SOURCEDRBDVOL with underlines)
+      # SOURCETYPE: FSBD:    {hostname}-FS-<SOURCEMOUNT>-{utcnow} (replace slashes in SOURCEMOUNT with underlines)
+      # SOURCETYPE: VM:      {hostname}-VM-<SOURCEVM>-<SOURCEVMDISK>-{utcnow} (multiple backups looped all specified VM disks)
+      # SOURCETYPE: VMFS:    {hostname}-FS-<SOURCEVM>-<mountpoint-in-vm>-{utcnow} (mountpoint-in-vm from 'virsh domfsinfo')
+
+  # SOURCETYPE: BD
+  SOURCEDRBDVOL:             source DRBD volume
+
+  # SOURCETYPE: FSBD
+  SOURCEDRBDVOL:             source DRBD volume
+  SOURCEMOUNT:               source mount point locally mounted (currently active in cluster)
+
+  # SOURCETYPE: VM
+  SOURCEVM:                  source virtual machine running locally in libvirt (currently running on this hypervisor host)
+
+  # SOURCETYPE: VMFS
+  SOURCEVM:                  source virtual machine running locally in libvirt (currently running on this hypervisor host)
+  SOURCEDRBDVOL:             source DRBD volume of disk in VM
+    
+  exmaples: 
+  # SOURCETYPE: BD
+  `basename $0`
+  --stype BD
+  --szfsds tank/blockdevices (or the whole ZPOOL: --szfsds tank)
+  --sdrbdvol 'bd1/0'
+  --dborgrepo root@backup:/backup/borg
+  --bname {fqdn}-bd1-sunday
+
+  # SOURCETYPE: FSBD
+  `basename $0`
+  --stype FSBD
+  --szfsds tank/xfsvols (or the whole ZPOOL: --szfsds tank)
+  --sdrbdvol 'xfs1/0'
+  --smount /srv/xfsvols/xfs1
+  --dborgrepo root@backup:/backup/borg
+  --bname {reverse-fqdn}-srv_xfsvols_xfs1-2018
+
+  # SOURCETYPE: VM
+  `basename $0`
+  --stype VM
+  --szfsds tank/drbdvms (or the whole ZPOOL: --szfsds tank)
+  --svm vm1.example.org
+  --dborgrepo root@backup:/backup/borg
+
+  # SOURCETYPE: VMFS
+  `basename $0`
+  --stype VMFS
+  --szfsds tank/drbdvms (or the whole ZPOOL: --szfsds tank)
+  --svm vm1.example.org
+  --sdrbdvol 'vm1_example_org/0'
+  --dborgrepo root@backup:/backup/borg
+  "
+}
+
+function zfsds_from_drbdvol(){
+  MYSOURCEZFSDS=$1
+  MYDRBDVOL=$2
+  echo "$MYSOURCEZFSDS/`echo "$MYDRBDVOL"|tr "/" "_"`"
+}
+
+
+#freeze
+function fs_freeze(){
+  MYZFSDS=$1
+  MYMOUNT=$2
+  MYZPOOL="`echo "$MYZFSDS"|awk -F "/" '{print $1}'`"
+
+  echo "flushing ZVOL /dev/zvol/$MYZFSDS"
+  blockdev --flushbufs /dev/zvol/$MYZFSDS
+  echo "flushing ZPOOL $MYZPOOL"
+  zpool sync $MYZPOOL
+  echo "doing sync"
+  sync
+  echo "freezing FS $MYMOUNT and syncing all stuff again"
+  (fsfreeze -f $MYMOUNT && sync && blockdev --flushbufs /dev/zvol/$MYZFSDS && zpool sync $MYZPOOL && sync ) || return 1
+}
+
+
+# unfreeze
+function fs_unfreeze(){
+  MYMOUNT=$1
+  echo "unfreezing FS $MYMOUNT"
+  fsfreeze -u $MYMOUNT || return 1
+}
+
+
+#freeze vm
+function vm_freeze(){
+  MYZFSDS=$1
+  MYVM=$2
+  MYZPOOL="`echo "$MYZFSDS"|awk -F "/" '{print $1}'`"
+
+  echo "flushing ZVOL /dev/zvol/$MYZFSDS"
+  blockdev --flushbufs /dev/zvol/$MYZFSDS
+  echo "flushing ZPOOL $MYZPOOL"
+  zpool sync $MYZPOOL
+  echo "doing sync"
+  sync
+  echo "freezing MYVM $MYVM"
+  virsh domfsfreeze $MYVM || return 1
+}
+
+
+# unfreeze vm
+function vm_unfreeze(){
+  MYVM=$1
+  echo "unfreezing MYVM  $MYVM"
+  virsh domfsthaw $MYVM || return 1
+}
+
+
+#create snap
+function zfs_create_snap(){
+  MYZFSDS=$1
+  MYSNAPNAME=$2
+  #create snap
+  echo "creating ZFS snapshot ${MYZFSDS}@${MYSNAPNAME} from ZFS dataset ${MYZFSDS}"
+  zfs snap ${MYZFSDS}@${MYSNAPNAME} || return 1
+}
+
+
+#create clone
+function zfs_create_clone(){
+  MYZFSDS=$1
+  MYSNAPNAME=$2
+  #create clone
+  echo "creating ZFS clone dataset ${MYZFSDS}__${MYSNAPNAME} from ${MYZFSDS}@${MYSNAPNAME}"
+  zfs clone ${MYZFSDS}@${MYSNAPNAME} ${MYZFSDS}__${MYSNAPNAME} || return 1
+}
+
+
+#remove snap
+function zfs_remove_snap(){
+  MYZFSDS=$1
+  MYSNAPNAME=$2
+  #remove snap
+  if zfs list -t snap 2>/dev/null |grep -q -w "${MYZFSDS}@${MYSNAPNAME}"; then 
+    echo "destroying ZFS snapshot ${MYZFSDS}@${MYSNAPNAME}"
+    zfs destroy ${MYZFSDS}@${MYSNAPNAME} || return 1
+  fi
+}
+
+
+#remove clone
+function zfs_remove_clone(){
+  MYZFSDS=$1
+  MYSNAPNAME=$2
+  #remove clone
+  if zfs list 2>/dev/null |grep -q -w "${MYZFSDS}__${MYSNAPNAME}"; then 
+    echo "destroying ZFS clone dataset ${MYZFSDS}__${MYSNAPNAME}"
+    zfs destroy ${MYZFSDS}__${MYSNAPNAME} || return 1
+  fi
+}
+
+
+#check if filesystem is mounted
+function fs_is_mounted(){
+  MYDRBDVOL=$1
+  MYDRBDRES="`echo "$MYDRBDVOL"|awk -F "/" '{print $1}'`"
+  MYMOUNT=$2
+  echo "Checking if MYDRBDRES $MYDRBDRES (MYDRBDVOL $MYDRBDVOL) is mounted to MYMOUNT $MYMOUNT"
+  if (drbdadm role $MYDRBDRES |grep Primary) && ( mount |grep -w "/dev/drbd/by-res/$MYDRBDVOL" || mount |grep -w "`drbdadm sh-dev $MYDRBDVOL`" )|grep -q -w "$MYMOUNT"; then
+    return 0;
+  else
+    return 1;
+  fi
+}
+
+
+#mount
+function fs_mount(){
+  MYZFSDS=$1
+  MYSNAPNAME=$2
+  MYMOUNT=$3
+  echo "mounting /dev/zvol/${MYZFSDS}__${MYSNAPNAME} to $MYMOUNT"
+  mkdir -p $MYMOUNT
+  mount -o ro,nouuid /dev/zvol/${MYZFSDS}__${MYSNAPNAME}  $MYMOUNT || return 1
+}
+
+
+#umount
+function fs_umount(){
+  MYZFSDS=$1
+  MYSNAPNAME=$2
+  MYMOUNT=$3
+  echo "unmounting $MYMOUNT or /dev/zvol/${MYZFSDS}__${MYSNAPNAME}"
+  umount $MYMOUNT || umount /dev/zvol/${MYZFSDS}__${MYSNAPNAME} || return 1
+  rmdir -p $MYMOUNT 2>/dev/null
+}
+
+
+#make backup
+function fs_backup(){
+  MYBORGREPO=$1
+  MYBACKUPNAME=$2
+  MYBACKUPDIR=$3
+
+  #ls -al $MYBACKUPDIR
+  #df -h $MYBACKUPDIR
+  echo borg create -v -s -p -C lz4 ${MYBORGREPO}::${MYBACKUPNAME} $MYBACKUPDIR
+  borg create -v -s -p -C lz4 ${MYBORGREPO}::${MYBACKUPNAME} $MYBACKUPDIR
+}
+
+
+function main(){
+  # opts
+  while [ "$1" != "" ]; do
+    case $1 in
+      --stype)
+        shift 
+        SOURCETYPE=$1
+        ;;
+      --szfsds)
+        shift 
+        SOURCEZFSDS=$1
+        ;;
+      --dborgrepo) 
+        shift 
+        DESTBORGREPO=$1
+        ;;
+      --bname) 
+        shift 
+        BACKUPNAME=$1
+        ;;
+      --sdrbdvol) 
+        shift 
+        SOURCEDRBDVOL=$1
+        ;;
+      --smount)
+        shift 
+        SOURCEMOUNT=$1
+        ;;
+      --svm) 
+        shift 
+        SOURCEVM=$1
+        ;;
+  
+      --help | -h) 
+        usage
+        return 0
+        ;;
+      * )
+        usage
+        return 1
+        ;;
+    esac
+    shift
+  done
+  
+  # load config file
+  [ -f "$PATH_SCRIPT/`basename $0`.conf" ] && . "$PATH_SCRIPT/`basename $0`.conf"
+  [ -f "{{ backup.dirprefix }}/{{ backup.etcdir }}/{{ backup.dozbconf }}" ] && . "{{ backup.dirprefix }}/{{ backup.etcdir }}/{{ backup.dozbconf }}"
+  
+  #debug input
+  echo "PATH_SCRIPT: \"$PATH_SCRIPT\""
+  echo "SOURCETYPE: \"$SOURCETYPE\""
+  echo "SOURCEZFSDS: \"$SOURCEZFSDS\""
+  echo "DESTBORGREPO: \"$DESTBORGREPO\""
+  echo "SOURCEDRBDVOL: \"$SOURCEDRBDVOL\""
+  echo "SOURCEMOUNT: \"$SOURCEMOUNT\""
+  echo "SOURCEVM: \"$SOURCEVM\""
+  
+  # input validation
+  if [ \
+       -z "$SOURCETYPE" \
+       -o -z "$SOURCEZFSDS" \
+       -o -z "$DESTBORGREPO" \
+     ]; then
+    usage
+    return 1
+  fi
+
+  [ -z "$SNAPNAME" ] && SNAPNAME="backup"
+  echo "SNAPNAME: \"$SNAPNAME\""
+
+
+  case $SOURCETYPE in
+    BD)
+      main_bd
+      ;;
+    FSBD)
+      if [ -z "$SOURCEMOUNT" ]; then
+        echo "--smount <SOURCEMOUNT> is a required option for dozb - Error - exiting"
+        return 1
+      fi
+      main_fsbd
+      ;;
+    VM)
+      if [ -z "$SOURCEVM" ]; then
+        echo "--svm <SOURCEVM> is a required option for dozb - Error - exiting"
+        return 1
+      fi
+      main_vm
+      ;;
+    VMFS)
+      if [ -z "$SOURCEVM" ]; then
+        echo "--svm <SOURCEVM> is a required option for dozb - Error - exiting"
+        return 1
+      fi
+      if [ -z "$SOURCEDRBDVOL" ]; then
+        echo "--sdrbdvol <SOURCEDRBDVOL> is a required option for dozb - Error - exiting"
+        return 1
+      fi
+      main_vmfs
+      ;;
+    *)
+      echo "SOURCETYPE \"$SOURCETYPE\" is not implemented - Error - exiting"
+      return 1
+      ;; 
+  esac
+
+  return 0
+}  
+
+
+function main_bd(){
+  [ -z "$BACKUPNAME" ] && BACKUPNAME="{hostname}-BD-`echo "$SOURCEDRBDVOL"|tr '/' '_'`-{utcnow}"
+  echo "BACKUPNAME: \"$BACKUPNAME\""
+}
+
+
+function main_fsbd(){
+  [ -z "$BACKUPNAME" ] && BACKUPNAME="{hostname}-FS-`echo "$SOURCEMOUNT"|tr '/' '_'`-{utcnow}"
+
+  ZFSDS="`zfsds_from_drbdvol $SOURCEZFSDS $SOURCEDRBDVOL`"
+
+  echo "BACKUPNAME: \"$BACKUPNAME\""
+  echo "ZFSDS: \"$ZFSDS\""
+
+  # check if FS is mounted locally
+  if fs_is_mounted $SOURCEDRBDVOL $SOURCEMOUNT; then
+
+    #remove old snaps
+    echo "main_fsbd: removing old snaps for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+    zfs_remove_snap $ZFSDS $SNAPNAME || return 1
+
+    # freeze fs
+    echo "main_fsbd: freezing FS for SOURCEMOUNT $SOURCEMOUNT"
+    fs_freeze $ZFSDS $SOURCEMOUNT
+
+    #create snap
+    echo "main_fsbd: creating snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+    zfs_create_snap $ZFSDS $SNAPNAME || (fs_unfreeze $SOURCEMOUNT; return 1)
+
+    # unfreeze fs
+    echo "main_fsbd: unfreezing FS for SOURCEMOUNT $SOURCEMOUNT"
+    fs_unfreeze $SOURCEMOUNT || return 1
+
+    #create clone
+    echo "main_fsbd: creating clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+    zfs_create_clone $ZFSDS $SNAPNAME 
+
+    #mount
+    echo "main_fsbd: mounting FS clone of SOURCEMOUNT $SOURCEMOUNT to /srv/backup$SOURCEMOUNT"
+    fs_mount $ZFSDS $SNAPNAME /srv/backup$SOURCEMOUNT
+
+    #make backup
+    fs_backup ${DESTBORGREPO} $BACKUPNAME /srv/backup$SOURCEMOUNT
+
+    #umount
+    echo "main_fsbd: unmounting FS clone of SOURCEMOUNT $SOURCEMOUNT from /srv/backup$SOURCEMOUNT"
+    fs_umount $ZFSDS $SNAPNAME /srv/backup$SOURCEMOUNT
+
+    #remove current clone
+    echo "main_fsbd: removing clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+    zfs_remove_clone $ZFSDS $SNAPNAME
+
+    #remove current snap
+    echo "main_fsbd: removing snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+    zfs_remove_snap $ZFSDS $SNAPNAME
+  else
+    echo "SOURCEDRBDVOL $SOURCEDRBDVOL is not mounted on SOURCEMOUNT $SOURCEMOUNT - FS will not be backed up - exiting"
+    return 1
+
+  fi
+
+}
+
+
+function main_vm(){
+  DISKS="`virsh domblklist $SOURCEVM 2>/dev/null |grep /dev/drbd/by-res/| perl -pe 's;^.*/dev/drbd/by-res/(.*/[0-9]+)\s*$;$1\n;g'`"
+  echo "DISKS: \"$DISKS\""
+  for DISK in $DISKS; do
+    # SOURCETYPE: VM:      {hostname}-VM-<SOURCEVM>-<SOURCEVMDISK>-{utcnow} (multiple backups looped all specified VM disks)
+    BACKUPNAME="{hostname}-VM-$SOURCEVM-`echo "$DISK"|tr "/" "_"`-{utcnow}"
+    echo "BACKUPNAME: \"$BACKUPNAME\""
+  done
+}
+
+function main_vmfs(){
+  if virsh list |grep -w $SOURCEVM |awk '{print $NF}'|grep -w -q running;  then
+    DEVICE_IN_VM="`virsh domblklist $SOURCEVM 2>/dev/null|grep -w /dev/drbd/by-res/$SOURCEDRBDVOL |awk '{print $1}'`"
+    DISKMOUNT="`virsh domfsinfo $SOURCEVM|grep -w "${DEVICE_IN_VM}$" |awk '{print $1}'`"
+
+    echo "DEVICE_IN_VM: \"$DEVICE_IN_VM\""
+    echo "DISKMOUNT: \"$DISKMOUNT\""
+
+    if [ -n "$DISKMOUNT" ]; then
+      ZFSDS="`zfsds_from_drbdvol $SOURCEZFSDS $SOURCEDRBDVOL`"
+      [ -z "$BACKUPNAME" ] && BACKUPNAME="{hostname}-FS-$SOURCEVM-`echo "$DISKMOUNT"|tr "/" "_"`-{utcnow}"
+
+      echo "ZFSDS: \"$ZFSDS\""
+      echo "BACKUPNAME: \"$BACKUPNAME\""
+    
+      #remove old snaps
+      echo "main_vmfs: removing old snaps for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+      zfs_remove_snap $ZFSDS $SNAPNAME || return 1
+
+      # freeze vm
+      echo "main_vmfs: freezing FSs in SOURCEVM $SOURCEVM"
+      vm_freeze $ZFSDS $SOURCEVM
+
+      #create snap
+      echo "main_vmfs: creating snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+      zfs_create_snap $ZFSDS $SNAPNAME || (vm_unfreeze $SOURCEVM; return 1)
+  
+      # unfreeze fs
+      echo "main_vmfs: unfreezing FSs in SOURCEVM $SOURCEVM"
+      vm_unfreeze $SOURCEVM || return 1
+
+      #create clone
+      echo "main_vmfs: creating clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+      zfs_create_clone $ZFSDS $SNAPNAME 
+
+      #mount
+      echo "main_vmfs: mounting FS clone of DISKMOUNT $DISKMOUNT to /srv/backup$DISKMOUNT"
+      fs_mount $ZFSDS $SNAPNAME /srv/backup$DISKMOUNT
+
+      #make backup
+      fs_backup ${DESTBORGREPO} $BACKUPNAME /srv/backup$DISKMOUNT
+
+      #umount
+      echo "main_vmfs: unmounting FS clone of DISKMOUNT $DISKMOUNT from /srv/backup$DISKMOUNT"
+      fs_umount $ZFSDS $SNAPNAME /srv/backup$DISKMOUNT
+
+      #remove current clone
+      echo "main_vmfs: removing clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+      zfs_remove_clone $ZFSDS $SNAPNAME
+
+      #remove current snap
+      echo "main_vmfs: removing snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+      zfs_remove_snap $ZFSDS $SNAPNAME
+    else
+      echo "SOURCEDRBDVOL $SOURCEDRBDVOL is not mounted on DISKMOUNT $DISKMOUNT in SOURCEVM $SOURCEVM - FS will not be backed up - exiting"
+      return 1
+    fi
+  else
+    echo "SOURCEVM $SOURCEVM is not running on this host - FS will not be backed up - exiting"
+    return 1
+  fi
+}
+
+  
+PIDFILE="/var/run/`basename $0`.pid"
+
+if [ -e "$PIDFILE" ]; then
+echo "PIDFILE $PIDFILE found"
+PID="`cat $PIDFILE`"
+  if kill -0 $PID >/dev/null 2>&1; then
+    echo "FAILURE: `basename $0` already running  - exiting"
+    exit 1
+  else
+    rm $PIDFILE
+  fi
+fi
+echo $$ > $PIDFILE
+
+PATH_SCRIPT="$(OLDPWD="`pwd`";cd "`dirname "$0"`";echo "`pwd`";cd "$OLDPWD")"
+DATE="`date +%Y-%m-%d_%H%M%S`"
+mkdir -p /var/log/`basename $0`
+main $@ 2>&1 |tee -a /var/log/`basename $0`/`basename $0`_$DATE.log
+
+rm $PIDFILE
