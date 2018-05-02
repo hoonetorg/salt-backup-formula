@@ -13,12 +13,14 @@ function usage(){
   # SOURCETYPE: FSBD
   --sdrbdvol <SOURCEDRBDVOL>
   --smount <SOURCEMOUNT>
+  --subdir <SUBDIR>
   # SOURCETYPE: VM
   --svm <SOURCEVM>
   # SOURCETYPE: VMFS
   --svm <SOURCEVM>
   --sdrbdvol <SOURCEDRBDVOL>
   --smount <SOURCEMOUNT>
+  --subdir <SUBDIR>
 
   SOURCETYPE:                FS(filesystem), BD(blockdevice) or VM(virtual machine)
   SOURCEZFSDS:               source ZFS dataset
@@ -36,6 +38,7 @@ function usage(){
   # SOURCETYPE: FSBD
   SOURCEDRBDVOL:             source DRBD volume
   SOURCEMOUNT:               source mount point locally mounted (currently active in cluster)
+  SUBDIR:                    relative subdir to SOURCEMOUNT which should be backed up, instead of backing up the whole FS
 
   # SOURCETYPE: VM
   SOURCEVM:                  source virtual machine running locally in libvirt (currently running on this hypervisor host)
@@ -43,6 +46,7 @@ function usage(){
   # SOURCETYPE: VMFS
   SOURCEVM:                  source virtual machine running locally in libvirt (currently running on this hypervisor host)
   SOURCEDRBDVOL:             source DRBD volume of disk in VM
+  SUBDIR:                    relative subdir to SOURCEDRBDVOL which should be backed up, instead of backing up the whole FS
     
   exmaples: 
   # SOURCETYPE: BD
@@ -59,6 +63,7 @@ function usage(){
   --szfsds tank/xfsvols (or the whole ZPOOL: --szfsds tank)
   --sdrbdvol 'xfs1/0'
   --smount /srv/xfsvols/xfs1
+  --subdir backupdir/data
   --dborgrepo root@backup:/backup/borg
   --bname {reverse-fqdn}-srv_xfsvols_xfs1-2018
 
@@ -75,6 +80,7 @@ function usage(){
   --szfsds tank/drbdvms (or the whole ZPOOL: --szfsds tank)
   --svm vm1.example.org
   --sdrbdvol 'vm1_example_org/0'
+  --subdir backupdir/data
   --dborgrepo root@backup:/backup/borg
   "
 }
@@ -110,6 +116,41 @@ function fs_unfreeze(){
   fsfreeze -u $MYMOUNT || return 1
 }
 
+#shutdown vm
+function vm_shutdown(){
+  MYZFSDS=$1
+  MYVM=$2
+  MYZPOOL="`echo "$MYZFSDS"|awk -F "/" '{print $1}'`"
+
+  echo "shutting down MYVM $MYVM"
+  virsh shutdown $MYVM || return 1
+  while true; do
+    (virsh list --name --state-running |grep -w $MYVM ) || break
+    echo "waiting for $MYVM to shutdown"
+    sleep 1
+  done
+
+  echo "flushing ZVOL /dev/zvol/$MYZFSDS"
+  blockdev --flushbufs /dev/zvol/$MYZFSDS
+  echo "flushing ZPOOL $MYZPOOL"
+  zpool sync $MYZPOOL
+  echo "doing sync"
+  sync
+}
+
+#start defined vm
+function vm_startup (){
+  MYVM=$1
+  echo "starting up MYVM $MYVM"
+  virsh start $MYVM || return 1
+}
+
+#create vm from xml file 
+function vm_create (){
+  MYVMXML=$1
+  echo "creating VM from up MYVMXML $MYVMXML"
+  virsh create $MYVMXML || return 1
+}
 
 #freeze vm
 function vm_freeze(){
@@ -125,6 +166,13 @@ function vm_freeze(){
   sync
   echo "freezing MYVM $MYVM"
   virsh domfsfreeze $MYVM || return 1
+
+  echo "flushing ZVOL /dev/zvol/$MYZFSDS"
+  blockdev --flushbufs /dev/zvol/$MYZFSDS
+  echo "flushing ZPOOL $MYZPOOL"
+  zpool sync $MYZPOOL
+  echo "doing sync"
+  sync
 }
 
 
@@ -271,6 +319,10 @@ function main(){
         shift 
         SOURCEMOUNT=$1
         ;;
+      --subdir)
+        shift 
+        SUBDIR=$1
+        ;;
       --svm) 
         shift 
         SOURCEVM=$1
@@ -299,6 +351,7 @@ function main(){
   echo "DESTBORGREPO: \"$DESTBORGREPO\""
   echo "SOURCEDRBDVOL: \"$SOURCEDRBDVOL\""
   echo "SOURCEMOUNT: \"$SOURCEMOUNT\""
+  echo "SUBDIR: \"$SUBDIR\""
   echo "SOURCEVM: \"$SOURCEVM\""
   
   # input validation
@@ -365,6 +418,9 @@ function main_fsbd(){
 
   ZFSDS="`zfsds_from_drbdvol $SOURCEZFSDS $SOURCEDRBDVOL`"
 
+  #just to initialize uselessly
+  #[ -z "$SUBDIR" ] && SUBDIR=""
+
   echo "BACKUPNAME: \"$BACKUPNAME\""
   echo "ZFSDS: \"$ZFSDS\""
 
@@ -395,8 +451,18 @@ function main_fsbd(){
     echo "main_fsbd: mounting FS clone of SOURCEMOUNT $SOURCEMOUNT to /srv/backup$SOURCEMOUNT"
     fs_mount $ZFSDS $SNAPNAME /srv/backup$SOURCEMOUNT
 
+    #define BACKUPDIR
+    if [ -n "$SUBDIR" ]; then
+      BACKUPDIR=/srv/backup$SOURCEMOUNT/$SUBDIR
+    else
+      BACKUPDIR=/srv/backup$SOURCEMOUNT
+    fi
+   
+    #check if BACKUPDIR is a dir
+    [ -d "$BACKUPDIR" ] || return 1
+
     #make backup
-    fs_backup ${DESTBORGREPO} $BACKUPNAME /srv/backup$SOURCEMOUNT
+    fs_backup ${DESTBORGREPO} $BACKUPNAME $BACKUPDIR
 
     #umount
     echo "main_fsbd: unmounting FS clone of SOURCEMOUNT $SOURCEMOUNT from /srv/backup$SOURCEMOUNT"
@@ -433,6 +499,9 @@ function main_vmfs(){
     DEVICE_IN_VM="`virsh domblklist $SOURCEVM 2>/dev/null|grep -w /dev/drbd/by-res/$SOURCEDRBDVOL |awk '{print $1}'`"
     DISKMOUNT="`virsh domfsinfo $SOURCEVM|grep -w "${DEVICE_IN_VM}$" |awk '{print $1}'`"
 
+    #just to initialize uselessly
+    #[ -z "$SUBDIR" ] && SUBDIR=""
+
     echo "DEVICE_IN_VM: \"$DEVICE_IN_VM\""
     echo "DISKMOUNT: \"$DISKMOUNT\""
 
@@ -467,8 +536,18 @@ function main_vmfs(){
       echo "main_vmfs: mounting FS clone of DISKMOUNT $DISKMOUNT to /srv/backup$DISKMOUNT"
       fs_mount $ZFSDS $SNAPNAME /srv/backup$DISKMOUNT
 
+      #define BACKUPDIR
+      if [ -n "$SUBDIR" ]; then
+        BACKUPDIR=/srv/backup$DISKMOUNT/$SUBDIR
+      else
+        BACKUPDIR=/srv/backup$DISKMOUNT
+      fi
+
+      #check if BACKUPDIR is a dir
+      [ -d "$BACKUPDIR" ] || return 1
+    
       #make backup
-      fs_backup ${DESTBORGREPO} $BACKUPNAME /srv/backup$DISKMOUNT
+      fs_backup ${DESTBORGREPO} $BACKUPNAME $BACKUPDIR
 
       #umount
       echo "main_vmfs: unmounting FS clone of DISKMOUNT $DISKMOUNT from /srv/backup$DISKMOUNT"
