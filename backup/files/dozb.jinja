@@ -143,10 +143,12 @@ function zfs_create_snap(){
   #create snap
   echo "creating ZFS snapshot ${MYZFSDS}@${MYSNAPNAME} from ZFS dataset ${MYZFSDS}"
   zfs snap ${MYZFSDS}@${MYSNAPNAME} || return 1
-  while true; do 
+  COUNTER=0
+  while [ $COUNTER -lt 10 ]; do 
     zfs list -t snap | grep ${MYZFSDS}@${MYSNAPNAME} && break
     echo wait
     sleep 1
+    COUNTER="`expr $COUNTER + 1`"
   done
 }
 
@@ -158,10 +160,12 @@ function zfs_create_clone(){
   #create clone
   echo "creating ZFS clone dataset ${MYZFSDS}__${MYSNAPNAME} from ${MYZFSDS}@${MYSNAPNAME}"
   zfs clone ${MYZFSDS}@${MYSNAPNAME} ${MYZFSDS}__${MYSNAPNAME} || return 1
-  while true; do 
+  COUNTER=0
+  while [ $COUNTER -lt 10 ]; do 
     ls -al /dev/zvol/${MYZFSDS}__${MYSNAPNAME} && break
     echo wait
     sleep 1
+    COUNTER="`expr $COUNTER + 1`"
   done
 }
 
