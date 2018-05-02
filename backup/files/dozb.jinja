@@ -16,11 +16,15 @@ function usage(){
   --subdir <SUBDIR>
   # SOURCETYPE: VM
   --svm <SOURCEVM>
+  --strategy <STRATEGY>
+  --svmxml <SOURCEVMXML>
   # SOURCETYPE: VMFS
   --svm <SOURCEVM>
   --sdrbdvol <SOURCEDRBDVOL>
   --smount <SOURCEMOUNT>
   --subdir <SUBDIR>
+  --strategy <STRATEGY>
+  --svmxml <SOURCEVMXML>
 
   SOURCETYPE:                FS(filesystem), BD(blockdevice) or VM(virtual machine)
   SOURCEZFSDS:               source ZFS dataset
@@ -42,11 +46,21 @@ function usage(){
 
   # SOURCETYPE: VM
   SOURCEVM:                  source virtual machine running locally in libvirt (currently running on this hypervisor host)
+  STRATEGY:                  strategy to ensure SOURCEVM consistency: 
+                               freeze(default) or 
+                               shutdown (followed by startup/create after snapping)
+  SOURCEVMXML:               libvirt xml definition file for SOURCEVM on current hypervisor when not defined/persistent
+                             only revelvant for STRATEGY shutdown
 
   # SOURCETYPE: VMFS
   SOURCEVM:                  source virtual machine running locally in libvirt (currently running on this hypervisor host)
   SOURCEDRBDVOL:             source DRBD volume of disk in VM
   SUBDIR:                    relative subdir to SOURCEDRBDVOL which should be backed up, instead of backing up the whole FS
+  STRATEGY:                  strategy to ensure SOURCEVM consistency: 
+                               freeze(default) or 
+                               shutdown (followed by startup/create after snapping)
+  SOURCEVMXML:               libvirt xml definition file for SOURCEVM on current hypervisor when not defined/persistent
+                             only revelvant for STRATEGY shutdown
     
   exmaples: 
   # SOURCETYPE: BD
@@ -72,6 +86,7 @@ function usage(){
   --stype VM
   --szfsds tank/drbdvms (or the whole ZPOOL: --szfsds tank)
   --svm vm1.example.org
+  --strategy freeze
   --dborgrepo root@backup:/backup/borg
 
   # SOURCETYPE: VMFS
@@ -81,6 +96,8 @@ function usage(){
   --svm vm1.example.org
   --sdrbdvol 'vm1_example_org/0'
   --subdir backupdir/data
+  --strategy shutdown
+  --svmxml /srv/vmxmls/vm1.example.org.xml
   --dborgrepo root@backup:/backup/borg
   "
 }
@@ -327,6 +344,14 @@ function main(){
         shift 
         SOURCEVM=$1
         ;;
+      --strategy) 
+        shift 
+        STRATEGY=$1
+        ;;
+      --svmxml) 
+        shift 
+        SOURCEVMXML=$1
+        ;;
   
       --help | -h) 
         usage
@@ -353,6 +378,7 @@ function main(){
   echo "SOURCEMOUNT: \"$SOURCEMOUNT\""
   echo "SUBDIR: \"$SUBDIR\""
   echo "SOURCEVM: \"$SOURCEVM\""
+  echo "SOURCEVMXML: \"$SOURCEVMXML\""
   
   # input validation
   if [ \
@@ -366,6 +392,9 @@ function main(){
 
   [ -z "$SNAPNAME" ] && SNAPNAME="backup"
   echo "SNAPNAME: \"$SNAPNAME\""
+
+  [ -z "$STRATEGY" ] && STRATEGY="freeze"
+  echo "STRATEGY: \"$STRATEGY\""
 
 
   case $SOURCETYPE in
@@ -499,6 +528,9 @@ function main_vmfs(){
     DEVICE_IN_VM="`virsh domblklist $SOURCEVM 2>/dev/null|grep -w /dev/drbd/by-res/$SOURCEDRBDVOL |awk '{print $1}'`"
     DISKMOUNT="`virsh domfsinfo $SOURCEVM|grep -w "${DEVICE_IN_VM}$" |awk '{print $1}'`"
 
+    #FIXME: dirty hack for shitty el6 hosts, where qemu-ga is usable for doing ... nothing ...
+    [ -z "$DISKMOUNT" ] && DISKMOUNT="/srv"
+
     #just to initialize uselessly
     #[ -z "$SUBDIR" ] && SUBDIR=""
 
@@ -516,17 +548,48 @@ function main_vmfs(){
       echo "main_vmfs: removing old snaps for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
       zfs_remove_snap $ZFSDS $SNAPNAME || return 1
 
-      # freeze vm
-      echo "main_vmfs: freezing FSs in SOURCEVM $SOURCEVM"
-      vm_freeze $ZFSDS $SOURCEVM
+      if [ "$STRATEGY" == "freeze" ]; then
+        # freeze vm
+        echo "main_vmfs: freezing FSs in SOURCEVM $SOURCEVM"
+        vm_freeze $ZFSDS $SOURCEVM
 
-      #create snap
-      echo "main_vmfs: creating snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
-      zfs_create_snap $ZFSDS $SNAPNAME || (vm_unfreeze $SOURCEVM; return 1)
+        #create snap
+        echo "main_vmfs: creating snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+        zfs_create_snap $ZFSDS $SNAPNAME || (vm_unfreeze $SOURCEVM; return 1)
+
+        # unfreeze fs
+        echo "main_vmfs: unfreezing FSs in SOURCEVM $SOURCEVM"
+        vm_unfreeze $SOURCEVM || return 1
+
+      elif [ "$STRATEGY" == "shutdown" ]; then
+        # shutdown vm
+        echo "main_vmfs: shutting down SOURCEVM $SOURCEVM"
+        vm_shutdown $ZFSDS $SOURCEVM
+
+        #create snap
+        echo "main_vmfs: creating snap for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+        #FIXME; dirty hack
+        if [ -n "$SOURCEVMXML" ]; then
+          zfs_create_snap $ZFSDS $SNAPNAME || (vm_create $SOURCEVMXML; return 1)
+        else
+          zfs_create_snap $ZFSDS $SNAPNAME || (vm_startup $SOURCEVM; return 1)
+        fi
+
+        # start vm
+        if [ -n "$SOURCEVMXML" ]; then
+          echo "main_vmfs: creating SOURCEVM $SOURCEVM from SOURCEVMXML $SOURCEVMXML"
+          vm_create $SOURCEVMXML || return 1
+        else
+          echo "main_vmfs: starting SOURCEVM $SOURCEVM"
+          vm_startup $SOURCEVM || return 1
+        fi
+
+      else
+        echo "unknown STRATEGY \"$STRATEGY\" - exiting"
+        return 1
+      fi
+
   
-      # unfreeze fs
-      echo "main_vmfs: unfreezing FSs in SOURCEVM $SOURCEVM"
-      vm_unfreeze $SOURCEVM || return 1
 
       #create clone
       echo "main_vmfs: creating clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
