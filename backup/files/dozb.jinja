@@ -526,6 +526,15 @@ function main_vm(){
 function main_vmfs(){
   if virsh list |grep -w $SOURCEVM |awk '{print $NF}'|grep -w -q running;  then
     DEVICE_IN_VM="`virsh domblklist $SOURCEVM 2>/dev/null|grep -w /dev/drbd/by-res/$SOURCEDRBDVOL |awk '{print $1}'`"
+    if [ -z "$DEVICE_IN_VM" ]; then
+      DEVICE_IN_VM="`virsh domblklist $SOURCEVM 2>/dev/null|grep -w /dev/zvol/$SOURCEZFSDS/$SOURCEDRBDVOL |awk '{print $1}'`"
+    fi
+    ### !!! undocumented: when using a zvol instead of a drbd dev for SOURCEDRBDVOL, it will also be backed up
+    if [ -z "$DEVICE_IN_VM" ]; then
+      echo "SOURCEDRBDVOL $SOURCEDRBDVOL could not be found in SOURCEVM $SOURCEVM - exiting"
+      return 1
+    fi
+
     DISKMOUNT="`virsh domfsinfo $SOURCEVM|grep -w "${DEVICE_IN_VM}$" |awk '{print $1}'`"
 
     #FIXME: dirty hack for shitty el6 hosts, where qemu-ga is usable for doing ... nothing ...
