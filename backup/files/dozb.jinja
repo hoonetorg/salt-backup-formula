@@ -456,6 +456,10 @@ function main_fsbd(){
   # check if FS is mounted locally
   if fs_is_mounted $SOURCEDRBDVOL $SOURCEMOUNT; then
 
+    #remove current clone
+    echo "main_fsbd: removing clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+    zfs_remove_clone $ZFSDS $SNAPNAME || return 1
+
     #remove old snaps
     echo "main_fsbd: removing old snaps for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
     zfs_remove_snap $ZFSDS $SNAPNAME || return 1
@@ -535,7 +539,7 @@ function main_vmfs(){
       return 1
     fi
 
-    DISKMOUNT="`virsh domfsinfo $SOURCEVM|grep -w "${DEVICE_IN_VM}$" |awk '{print $1}'`"
+    DISKMOUNT="`virsh domfsinfo $SOURCEVM|grep -w "${DEVICE_IN_VM}$" |awk '{print $1}'|head -1`"
 
     #FIXME: dirty hack for shitty el6 hosts, where qemu-ga is usable for doing ... nothing ...
     [ -z "$DISKMOUNT" ] && DISKMOUNT="/srv"
@@ -553,6 +557,10 @@ function main_vmfs(){
       echo "ZFSDS: \"$ZFSDS\""
       echo "BACKUPNAME: \"$BACKUPNAME\""
     
+      #remove current clone
+      echo "main_vmfs: removing clone for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
+      zfs_remove_clone $ZFSDS $SNAPNAME || return 1
+
       #remove old snaps
       echo "main_vmfs: removing old snaps for ZFSDS $ZFSDS with SNAPNAME $SNAPNAME"
       zfs_remove_snap $ZFSDS $SNAPNAME || return 1
