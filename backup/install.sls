@@ -5,7 +5,7 @@
 
 backup_install__pkg:
   pkg.installed:
-    - pkgs: {{ backup.pkgs }}
+    - pkgs: {{ backup.pkgs | tojson }}
 
 backup_install__dozbscript:
   file.managed:
