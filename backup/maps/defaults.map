@@ -2,8 +2,8 @@
 # vim: ft=yaml
 
 defaults:
-  pkgs:
-    - borgbackup
+  pkgs: []
+  #  - borgbackup
   dirprefix: '/usr/local'
   bindir: 'sbin'
   etcdir: 'etc'
