@@ -4,6 +4,7 @@
 defaults:
   pkgs: []
   #  - borgbackup
+  borgurl: 'https://github.com/borgbackup/borg/releases/download/1.1.11/borg-linux64'
   dirprefix: '/usr/local'
   bindir: 'sbin'
   etcdir: 'etc'
