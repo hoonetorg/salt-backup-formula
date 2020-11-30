@@ -181,6 +181,7 @@ function vm_freeze(){
   zpool sync $MYZPOOL
   echo "doing sync"
   sync
+  #FIXME: implement domfstrim
   echo "freezing MYVM $MYVM"
   virsh domfsfreeze $MYVM || return 1
 
